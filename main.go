@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -16,9 +17,22 @@ const (
 	secretAccessKey = "minioadmin"
 )	
 
+type objStore interface {
+	MakeBucket(context.Context, string, minio.MakeBucketOptions) error
+	BucketExists(context.Context, string) (bool, error)	
+	PutObject(context.Context, string, string, io.Reader, int64, minio.PutObjectOptions) (minio.UploadInfo, error)
+}
+
 type server struct {
-	minioClient *minio.Client
+	minioClient objStore
 	bucketName string
+}
+
+func NewServer (minioClient objStore, bucketName string) server {
+	return server{
+		minioClient: minioClient,
+		bucketName: bucketName,
+	}
 }
 
 func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request) {
@@ -77,10 +91,7 @@ func main() {
 		log.Printf("Successfully created %s\n", bucketName)
 	}
 
-	s := server{
-		minioClient: minioClient,
-		bucketName: bucketName,
-	}
+	s := NewServer(minioClient, bucketName)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/upload", s.handlePostUploadFile)
