@@ -5,17 +5,21 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path"
 	"time"
 
 	"github.com/julienschmidt/httprouter"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/sio"
+	"golang.org/x/crypto/argon2"
 )
 
 const (
 	minioEndpoint = "127.0.0.1:9000"
 	accessKeyID = "minioadmin"
 	secretAccessKey = "minioadmin"
+	encryptionKey = "a static encryption key"
 )	
 
 type objStorer interface {
@@ -63,7 +67,24 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 	}
 	defer file.Close()
 
-	info, err := s.minioClient.PutObject(r.Context(), s.bucketName, handler.Filename, file, handler.Size)
+	salt := []byte(path.Join(s.bucketName, handler.Filename))
+	encrypted, err := sio.EncryptReader(file, sio.Config{
+		Key: argon2.IDKey([]byte(encryptionKey), salt, 1, 64*1024, 4, 32),
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println("encrypt file:", err)
+		return
+	}
+
+	encryptedSize, err  := sio.EncryptedSize(uint64(handler.Size))
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println("encrypted size:", err)
+		return
+	}
+
+	info, err := s.minioClient.PutObject(r.Context(), s.bucketName, handler.Filename, encrypted, int64(encryptedSize))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Printf("put object filename %s:, error %s", handler.Filename, err)
@@ -75,7 +96,8 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 }
 
 func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	obj, err := s.minioClient.GetObject(r.Context(), s.bucketName, ps.ByName("filename"))
+	filename := ps.ByName("filename")
+	obj, err := s.minioClient.GetObject(r.Context(), s.bucketName, filename)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Println("get object:", err)
@@ -87,29 +109,19 @@ func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprou
 		return
 	}
 	defer obj.Close()
-
-	body, err := io.ReadAll(obj)
+	
+	salt := []byte(path.Join(s.bucketName, filename))
+	_, err = sio.Decrypt(w, obj, sio.Config{
+		Key: argon2.IDKey([]byte(encryptionKey), salt, 1, 64*1024, 4, 32),
+	})
 	if err != nil {
 		if err.Error() == "The specified key does not exist." {
 			w.WriteHeader(http.StatusNotFound)
-			log.Println("file not found")
 			return
 		}
-		
-		w.WriteHeader(http.StatusInternalServerError)
-		log.Println("read file:", err)
-		return
-	}
-	if len(body) == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		log.Println("file not found")
-		return
-	}
 
-	_, err = w.Write(body)
-	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println("write body:", err)
+		log.Println("decrypt file:", err)
 		return
 	}
 }

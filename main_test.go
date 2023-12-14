@@ -7,11 +7,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"strings"
 	"testing"
 
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/sio"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/argon2"
 )
 
 func TestHandlePostUploadFile(t *testing.T) {
@@ -36,7 +39,7 @@ func TestHandlePostUploadFile(t *testing.T) {
 			go func () {
 				defer writer.Close()
 
-				ff, err := writer.CreateFormFile("file", "testFileName.text")
+				ff, err := writer.CreateFormFile("file", "testFileName.txt")
 				require.NoError(t, err)
 
 				_, err = ff.Write([]byte("test file contents"))
@@ -106,7 +109,7 @@ func (m mockObjStore) PutObject(_ context.Context, _, _ string, _ io.Reader, siz
 	return minio.UploadInfo{Size: size}, nil
 }
 
-func (m mockObjStore) GetObject(_ context.Context, _, _ string) (io.ReadCloser, error) {
+func (m mockObjStore) GetObject(_ context.Context, bucketName, filename string) (io.ReadCloser, error) {
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -116,7 +119,15 @@ func (m mockObjStore) GetObject(_ context.Context, _, _ string) (io.ReadCloser, 
 	}
 
 	obj := strings.NewReader(m.objectBody)
-	return io.NopCloser(obj), nil
+	salt := []byte(path.Join(bucketName, filename))
+	encrypted, err := sio.EncryptReader(obj, sio.Config{
+		Key: argon2.IDKey([]byte(encryptionKey), salt, 1, 64*1024, 4, 32),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return io.NopCloser(encrypted), nil
 }
 
 type errorReader struct {
