@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/julienschmidt/httprouter"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -18,9 +19,8 @@ const (
 )	
 
 type objStore interface {
-	MakeBucket(context.Context, string, minio.MakeBucketOptions) error
-	BucketExists(context.Context, string) (bool, error)	
 	PutObject(context.Context, string, string, io.Reader, int64, minio.PutObjectOptions) (minio.UploadInfo, error)
+	GetObject(context.Context, string, string, minio.GetObjectOptions) (*minio.Object, error)
 }
 
 type server struct {
@@ -35,7 +35,7 @@ func NewServer (minioClient objStore, bucketName string) server {
 	}
 }
 
-func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request) {
+func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	err := r.ParseMultipartForm(10 << 20)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -54,12 +54,52 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request) {
 	info, err := s.minioClient.PutObject(r.Context(), s.bucketName, handler.Filename, file, handler.Size, minio.PutObjectOptions{})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Println("put object:", err)
+		log.Printf("put object filename %s:, error %s", handler.Filename, err)
 	}
 
 	log.Println("uploaded file", handler.Filename, "of size", info.Size)
 
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	obj, err := s.minioClient.GetObject(r.Context(), s.bucketName, ps.ByName("filename"), minio.GetObjectOptions{})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println("get object:", err)
+		return
+	}
+	if obj == nil {
+		w.WriteHeader(http.StatusNotFound)
+		log.Println("file not found")
+		return
+	}
+	defer obj.Close()
+
+	body, err := io.ReadAll(obj)
+	if err != nil {
+		if err.Error() == "The specified key does not exist." {
+			w.WriteHeader(http.StatusNotFound)
+			log.Println("file not found")
+			return
+		}
+		
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println("read file:", err)
+		return
+	}
+	if len(body) == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		log.Println("file not found")
+		return
+	}
+
+	_, err = w.Write(body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println("write body:", err)
+		return
+	}
 }
 
 func main() {
@@ -93,10 +133,11 @@ func main() {
 
 	s := NewServer(minioClient, bucketName)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/upload", s.handlePostUploadFile)
+	router := httprouter.New()
+	router.POST("/upload", s.handlePostUploadFile)
+	router.GET("/file/:filename", s.handleGetFile)
 
-	err = http.ListenAndServe(":2001", mux)
+	err = http.ListenAndServe(":2001", router)
 	if err != nil {
 		log.Fatalln(err)
 	}

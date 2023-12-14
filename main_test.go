@@ -45,7 +45,7 @@ func TestHandlePostUpload(t *testing.T) {
 			req.Header.Add("Content-Type", writer.FormDataContentType())
 			w := httptest.NewRecorder()
 
-			s.handlePostUploadFile(w, req)
+			s.handlePostUploadFile(w, req, nil)
 
 			require.Equal(t, test.wantStatus, w.Result().StatusCode)
 		})
@@ -56,18 +56,14 @@ type mockObjStore struct{
 	err error
 }
 
-func (m mockObjStore) MakeBucket(_ context.Context, _ string, _ minio.MakeBucketOptions) error {
-	panic("not implemented")
-}
-
-func (m mockObjStore) BucketExists(_ context.Context, _ string) (bool, error) {
-	panic("not implemented")
-}
-
-func (m mockObjStore)	PutObject(_ context.Context, _, _ string, _ io.Reader, size int64, _ minio.PutObjectOptions) (minio.UploadInfo, error) {
+func (m mockObjStore) PutObject(_ context.Context, _, _ string, _ io.Reader, size int64, _ minio.PutObjectOptions) (minio.UploadInfo, error) {
 	if m.err != nil {
 		return minio.UploadInfo{}, m.err
 	}
 
 	return minio.UploadInfo{Size: size}, nil
+}
+
+func (m mockObjStore) GetObject(_ context.Context, _, _ string, _ minio.GetObjectOptions) (*minio.Object, error) {
+	panic("not implemented")
 }
