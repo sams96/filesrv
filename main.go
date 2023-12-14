@@ -15,18 +15,23 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+// Since this is a demo projct, I have included the configuration here, but for
+// a production system these would be stored externally
 const (
-	minioEndpoint = "127.0.0.1:9000"
-	accessKeyID = "minioadmin"
+	minioEndpoint   = "127.0.0.1:9000"
+	accessKeyID     = "minioadmin"
 	secretAccessKey = "minioadmin"
-	encryptionKey = "a static encryption key"
-)	
+	bucketName      = "filesrv"
+	encryptionKey   = "a static encryption key"
+)
 
+// objStorer abstracts the minio operations to allow dependency injection
 type objStorer interface {
 	PutObject(context.Context, string, string, io.Reader, int64) (minio.UploadInfo, error)
 	GetObject(context.Context, string, string) (io.ReadCloser, error)
 }
 
+// minioStore wraps the needed minio functions to allow for easier testing
 type minioStore struct {
 	c *minio.Client
 }
@@ -39,18 +44,21 @@ func (m minioStore) GetObject(ctx context.Context, bucketName, filename string) 
 	return m.c.GetObject(ctx, bucketName, filename, minio.GetObjectOptions{})
 }
 
+// server stores the dependencies for the http handlers
 type server struct {
 	minioClient objStorer
-	bucketName string
+	bucketName  string
 }
 
-func NewServer (minioClient objStorer, bucketName string) server {
+func NewServer(minioClient objStorer, bucketName string) server {
 	return server{
 		minioClient: minioClient,
-		bucketName: bucketName,
+		bucketName:  bucketName,
 	}
 }
 
+// handlePostUploadFile accepts a file in the form with key "file", encrypts the
+// contents and stores it in minio
 func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	err := r.ParseMultipartForm(10 << 20)
 	if err != nil {
@@ -67,6 +75,9 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 	}
 	defer file.Close()
 
+	// I chose to use the encryption method detailed in the minio documentation,
+	// since it is designed for data at rest, works well with minio, and is
+	// relativly well used.
 	salt := []byte(path.Join(s.bucketName, handler.Filename))
 	encrypted, err := sio.EncryptReader(file, sio.Config{
 		Key: argon2.IDKey([]byte(encryptionKey), salt, 1, 64*1024, 4, 32),
@@ -77,7 +88,7 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 		return
 	}
 
-	encryptedSize, err  := sio.EncryptedSize(uint64(handler.Size))
+	encryptedSize, err := sio.EncryptedSize(uint64(handler.Size))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Println("encrypted size:", err)
@@ -87,7 +98,7 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 	info, err := s.minioClient.PutObject(r.Context(), s.bucketName, handler.Filename, encrypted, int64(encryptedSize))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		log.Printf("put object filename %s:, error %s", handler.Filename, err)
+		log.Printf("put object: filename: %s, error: %s", handler.Filename, err)
 	}
 
 	log.Println("uploaded file", handler.Filename, "of size", info.Size)
@@ -95,6 +106,8 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 	w.WriteHeader(http.StatusCreated)
 }
 
+// handleGetFile gets the file with name given in the URL, decrypts it and
+// returns it in the response body
 func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 	filename := ps.ByName("filename")
 	obj, err := s.minioClient.GetObject(r.Context(), s.bucketName, filename)
@@ -109,7 +122,7 @@ func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprou
 		return
 	}
 	defer obj.Close()
-	
+
 	salt := []byte(path.Join(s.bucketName, filename))
 	_, err = sio.Decrypt(w, obj, sio.Config{
 		Key: argon2.IDKey([]byte(encryptionKey), salt, 1, 64*1024, 4, 32),
@@ -129,20 +142,16 @@ func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprou
 func main() {
 	// Initialize minio client object.
 	minioClient, err := minio.New(minioEndpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
+		Creds: credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
 	})
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-	// Make a new bucket called testbucket.
-	bucketName := "testbucket"
-	location := "eu-west-1"
-
 	ctx, cancelFunc := context.WithTimeout(context.Background(), time.Minute)
 	defer cancelFunc()
 
-	err = minioClient.MakeBucket(ctx, bucketName, minio.MakeBucketOptions{Region: location})
+	err = minioClient.MakeBucket(ctx, bucketName, minio.MakeBucketOptions{})
 	if err != nil {
 		// Check to see if we already own this bucket (which happens if you run this twice)
 		exists, errBucketExists := minioClient.BucketExists(ctx, bucketName)
@@ -152,11 +161,13 @@ func main() {
 			log.Fatalln(err)
 		}
 	} else {
-		log.Printf("Successfully created %s\n", bucketName)
+		log.Printf("Successfully created bucket %s\n", bucketName)
 	}
 
 	s := NewServer(minioStore{c: minioClient}, bucketName)
 
+	// I used the httprouter package because it allows me to easily expose the
+	// API that I want with minimal code.
 	router := httprouter.New()
 	router.POST("/upload", s.handlePostUploadFile)
 	router.GET("/file/:filename", s.handleGetFile)
