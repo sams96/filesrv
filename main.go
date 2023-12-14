@@ -18,17 +18,29 @@ const (
 	secretAccessKey = "minioadmin"
 )	
 
-type objStore interface {
-	PutObject(context.Context, string, string, io.Reader, int64, minio.PutObjectOptions) (minio.UploadInfo, error)
-	GetObject(context.Context, string, string, minio.GetObjectOptions) (*minio.Object, error)
+type objStorer interface {
+	PutObject(context.Context, string, string, io.Reader, int64) (minio.UploadInfo, error)
+	GetObject(context.Context, string, string) (io.ReadCloser, error)
+}
+
+type minioStore struct {
+	c *minio.Client
+}
+
+func (m minioStore) PutObject(ctx context.Context, bucketName, filename string, f io.Reader, size int64) (minio.UploadInfo, error) {
+	return m.c.PutObject(ctx, bucketName, filename, f, size, minio.PutObjectOptions{})
+}
+
+func (m minioStore) GetObject(ctx context.Context, bucketName, filename string) (io.ReadCloser, error) {
+	return m.c.GetObject(ctx, bucketName, filename, minio.GetObjectOptions{})
 }
 
 type server struct {
-	minioClient objStore
+	minioClient objStorer
 	bucketName string
 }
 
-func NewServer (minioClient objStore, bucketName string) server {
+func NewServer (minioClient objStorer, bucketName string) server {
 	return server{
 		minioClient: minioClient,
 		bucketName: bucketName,
@@ -51,7 +63,7 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 	}
 	defer file.Close()
 
-	info, err := s.minioClient.PutObject(r.Context(), s.bucketName, handler.Filename, file, handler.Size, minio.PutObjectOptions{})
+	info, err := s.minioClient.PutObject(r.Context(), s.bucketName, handler.Filename, file, handler.Size)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Printf("put object filename %s:, error %s", handler.Filename, err)
@@ -63,7 +75,7 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 }
 
 func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-	obj, err := s.minioClient.GetObject(r.Context(), s.bucketName, ps.ByName("filename"), minio.GetObjectOptions{})
+	obj, err := s.minioClient.GetObject(r.Context(), s.bucketName, ps.ByName("filename"))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Println("get object:", err)
@@ -131,7 +143,7 @@ func main() {
 		log.Printf("Successfully created %s\n", bucketName)
 	}
 
-	s := NewServer(minioClient, bucketName)
+	s := NewServer(minioStore{c: minioClient}, bucketName)
 
 	router := httprouter.New()
 	router.POST("/upload", s.handlePostUploadFile)
