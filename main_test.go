@@ -18,25 +18,31 @@ import (
 )
 
 func TestHandlePostUploadFile(t *testing.T) {
-	tests := []struct{
-		name string
+	tests := []struct {
+		name       string
+		err        error
 		wantStatus int
 	}{
 		{
-			name: "should work",
+			name:       "should work",
 			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "put object error",
+			err:        errors.New("a put object error"),
+			wantStatus: http.StatusInternalServerError,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store := mockObjStore{err: nil}
+			store := mockObjStore{err: test.err}
 			s := NewServer(store, "testBucket")
 
 			pr, pw := io.Pipe()
 			writer := multipart.NewWriter(pw)
 
-			go func () {
+			go func() {
 				defer writer.Close()
 
 				ff, err := writer.CreateFormFile("file", "testFileName.txt")
@@ -58,21 +64,21 @@ func TestHandlePostUploadFile(t *testing.T) {
 }
 
 func TestHandleGetFile(t *testing.T) {
-	tests := []struct{
-		name string
-		objectBody string
+	tests := []struct {
+		name        string
+		objectBody  string
 		readerError error
-		wantStatus int
+		wantStatus  int
 	}{
 		{
-			name: "should work",
+			name:       "should work",
 			objectBody: "test file contents",
 			wantStatus: http.StatusOK,
 		},
 		{
-			name: "file not found",
+			name:        "file not found",
 			readerError: errors.New("The specified key does not exist."),
-			wantStatus: http.StatusNotFound,
+			wantStatus:  http.StatusNotFound,
 		},
 	}
 
@@ -96,9 +102,9 @@ func TestHandleGetFile(t *testing.T) {
 }
 
 type mockObjStore struct {
-	objectBody string
+	objectBody  string
 	readerError error
-	err error
+	err         error
 }
 
 func (m mockObjStore) PutObject(_ context.Context, _, _ string, _ io.Reader, size int64) (minio.UploadInfo, error) {
