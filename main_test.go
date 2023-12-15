@@ -104,6 +104,7 @@ func TestHandleGetFile(t *testing.T) {
 			s.handleGetFile(w, req, nil)
 
 			require.Equal(t, test.wantStatus, w.Result().StatusCode)
+			require.Equal(t, test.objectBody, w.Body.String())
 		})
 	}
 }
@@ -128,10 +129,12 @@ func (m mockObjStore) GetObject(_ context.Context, bucketName, filename string) 
 		return nil, m.err
 	}
 
+	// return an io.Reader that will just return an error on read
 	if m.readerError != nil {
 		return io.NopCloser(errorReader{err: m.readerError}), nil
 	}
 
+	// return an io.Reader with an encrypted message
 	obj := strings.NewReader(m.objectBody)
 	salt := []byte(path.Join(bucketName, filename))
 	encrypted, err := sio.EncryptReader(obj, sio.Config{

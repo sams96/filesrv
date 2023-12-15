@@ -23,7 +23,10 @@ const (
 	secretAccessKey = "minioadmin"
 	bucketName      = "filesrv"
 	encryptionKey   = "a static encryption key"
-	chunkSize       = 10 << 17 // ~ 1MB
+
+	// minio can handle uploading in parts for us, but it doesn't exactly match
+	// the given spec because the minimum chunk size is 5MB
+	chunkSize = 10 << 19 // ~ 5MB
 )
 
 // objStorer abstracts the minio operations to allow dependency injection
@@ -109,6 +112,9 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 
 	log.Println("uploaded file", handler.Filename, "of size", info.Size)
 
+	// I am just using status codes for responses here because it is a demo
+	// project, a real service would include a response body with more
+	// information such as more detailed errors.
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -143,8 +149,6 @@ func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprou
 		log.Println("decrypt file:", err)
 		return
 	}
-
-	w.WriteHeader(http.StatusOK)
 }
 
 func main() {
