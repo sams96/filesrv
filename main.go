@@ -23,12 +23,13 @@ const (
 	secretAccessKey = "minioadmin"
 	bucketName      = "filesrv"
 	encryptionKey   = "a static encryption key"
+	chunkSize       = 10 << 17 // ~ 1MB
 )
 
 // objStorer abstracts the minio operations to allow dependency injection
 type objStorer interface {
-	PutObject(context.Context, string, string, io.Reader, int64) (minio.UploadInfo, error)
-	GetObject(context.Context, string, string) (io.ReadCloser, error)
+	PutObject(ctx context.Context, bucketName, filename string, file io.Reader, size, chunkSize int64) (minio.UploadInfo, error)
+	GetObject(ctx context.Context, bucketName, filename string) (io.ReadCloser, error)
 }
 
 // minioStore wraps the needed minio functions to allow for easier testing
@@ -36,8 +37,8 @@ type minioStore struct {
 	c *minio.Client
 }
 
-func (m minioStore) PutObject(ctx context.Context, bucketName, filename string, f io.Reader, size int64) (minio.UploadInfo, error) {
-	return m.c.PutObject(ctx, bucketName, filename, f, size, minio.PutObjectOptions{})
+func (m minioStore) PutObject(ctx context.Context, bucketName, filename string, f io.Reader, size, chunkSize int64) (minio.UploadInfo, error) {
+	return m.c.PutObject(ctx, bucketName, filename, f, size, minio.PutObjectOptions{PartSize: uint64(chunkSize)})
 }
 
 func (m minioStore) GetObject(ctx context.Context, bucketName, filename string) (io.ReadCloser, error) {
@@ -46,14 +47,18 @@ func (m minioStore) GetObject(ctx context.Context, bucketName, filename string) 
 
 // server stores the dependencies for the http handlers
 type server struct {
-	minioClient objStorer
-	bucketName  string
+	minioClient   objStorer
+	bucketName    string
+	encryptionKey string
+	chunkSize     int64
 }
 
-func NewServer(minioClient objStorer, bucketName string) server {
+func NewServer(minioClient objStorer, bucketName, encryptionKey string, chunkSize int64) server {
 	return server{
-		minioClient: minioClient,
-		bucketName:  bucketName,
+		minioClient:   minioClient,
+		bucketName:    bucketName,
+		encryptionKey: encryptionKey,
+		chunkSize:     chunkSize,
 	}
 }
 
@@ -80,7 +85,7 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 	// relativly well used.
 	salt := []byte(path.Join(s.bucketName, handler.Filename))
 	encrypted, err := sio.EncryptReader(file, sio.Config{
-		Key: argon2.IDKey([]byte(encryptionKey), salt, 1, 64*1024, 4, 32),
+		Key: argon2.IDKey([]byte(s.encryptionKey), salt, 1, 64*1024, 4, 32),
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -95,10 +100,11 @@ func (s server) handlePostUploadFile(w http.ResponseWriter, r *http.Request, _ h
 		return
 	}
 
-	info, err := s.minioClient.PutObject(r.Context(), s.bucketName, handler.Filename, encrypted, int64(encryptedSize))
+	info, err := s.minioClient.PutObject(r.Context(), s.bucketName, handler.Filename, encrypted, int64(encryptedSize), s.chunkSize)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Printf("put object: filename: %s, error: %s", handler.Filename, err)
+		return
 	}
 
 	log.Println("uploaded file", handler.Filename, "of size", info.Size)
@@ -125,7 +131,7 @@ func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprou
 
 	salt := []byte(path.Join(s.bucketName, filename))
 	_, err = sio.Decrypt(w, obj, sio.Config{
-		Key: argon2.IDKey([]byte(encryptionKey), salt, 1, 64*1024, 4, 32),
+		Key: argon2.IDKey([]byte(s.encryptionKey), salt, 1, 64*1024, 4, 32),
 	})
 	if err != nil {
 		if err.Error() == "The specified key does not exist." {
@@ -137,6 +143,8 @@ func (s server) handleGetFile(w http.ResponseWriter, r *http.Request, ps httprou
 		log.Println("decrypt file:", err)
 		return
 	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func main() {
@@ -164,7 +172,7 @@ func main() {
 		log.Printf("Successfully created bucket %s\n", bucketName)
 	}
 
-	s := NewServer(minioStore{c: minioClient}, bucketName)
+	s := NewServer(minioStore{c: minioClient}, bucketName, encryptionKey, chunkSize)
 
 	// I used the httprouter package because it allows me to easily expose the
 	// API that I want with minimal code.

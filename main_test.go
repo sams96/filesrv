@@ -37,7 +37,7 @@ func TestHandlePostUploadFile(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := mockObjStore{err: test.err}
-			s := NewServer(store, "testBucket")
+			s := NewServer(store, "testBucket", "key", 10<<17)
 
 			pr, pw := io.Pipe()
 			writer := multipart.NewWriter(pw)
@@ -67,6 +67,7 @@ func TestHandleGetFile(t *testing.T) {
 	tests := []struct {
 		name        string
 		objectBody  string
+		err         error
 		readerError error
 		wantStatus  int
 	}{
@@ -74,6 +75,11 @@ func TestHandleGetFile(t *testing.T) {
 			name:       "should work",
 			objectBody: "test file contents",
 			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "get object error",
+			err:        errors.New("an error"),
+			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:        "file not found",
@@ -85,11 +91,12 @@ func TestHandleGetFile(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store := mockObjStore{
-				objectBody:  test.objectBody,
-				readerError: test.readerError,
-				err:         nil,
+				objectBody:    test.objectBody,
+				encryptionKey: "key",
+				readerError:   test.readerError,
+				err:           test.err,
 			}
-			s := NewServer(store, "testBucket")
+			s := NewServer(store, "testBucket", "key", 10<<17)
 
 			req := httptest.NewRequest(http.MethodGet, "/file/filename", nil)
 			w := httptest.NewRecorder()
@@ -102,12 +109,13 @@ func TestHandleGetFile(t *testing.T) {
 }
 
 type mockObjStore struct {
-	objectBody  string
-	readerError error
-	err         error
+	objectBody    string
+	encryptionKey string
+	readerError   error
+	err           error
 }
 
-func (m mockObjStore) PutObject(_ context.Context, _, _ string, _ io.Reader, size int64) (minio.UploadInfo, error) {
+func (m mockObjStore) PutObject(_ context.Context, _, _ string, _ io.Reader, size, chunkSize int64) (minio.UploadInfo, error) {
 	if m.err != nil {
 		return minio.UploadInfo{}, m.err
 	}
@@ -127,7 +135,7 @@ func (m mockObjStore) GetObject(_ context.Context, bucketName, filename string) 
 	obj := strings.NewReader(m.objectBody)
 	salt := []byte(path.Join(bucketName, filename))
 	encrypted, err := sio.EncryptReader(obj, sio.Config{
-		Key: argon2.IDKey([]byte(encryptionKey), salt, 1, 64*1024, 4, 32),
+		Key: argon2.IDKey([]byte(m.encryptionKey), salt, 1, 64*1024, 4, 32),
 	})
 	if err != nil {
 		return nil, err
